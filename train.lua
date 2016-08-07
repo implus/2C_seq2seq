@@ -4,13 +4,14 @@ require 'hdf5'
 
 require 'data.lua'
 require 'util.lua'
+require 'mapxy.lua'
 require 'models.lua'
 require 'model_utils.lua'
 
 cmd = torch.CmdLine()
 -- data files
 
-cmd:text('') cmd.text("**Data options") cmd.text('')
+cmd:text('') cmd:text("**Data options") cmd:text('')
 cmd:option('-data_file', 'data/demo-train.hdf5', [[train]])
 cmd:option('-val_data_file', 'data/demo-val.hdf5', [[valid]])
 cmd:option('-savefile', 'models/2C_seq2seq', [[savefile_epochX_PPL.t7]])
@@ -19,12 +20,13 @@ cmd:option('-train_from', '', [[from some savefile]])
 -- rnn model
 cmd:text('') cmd:text('**Mode options') cmd:text('')
 cmd:option('-num_layers', 2, [[Number of layers in enc/dec]])
-cmd:option('-rnn_size', 512, [[rnn size]])
-cmd:option('-word_vec_size', 512, [[word embedding size]])
+cmd:option('-rnn_size', 650, [[rnn size]])
+cmd:option('-word_vec_size', 650, [[word embedding size]])
 cmd:option('-attn', 1, [[use attention on the decoder side]])
-cmd:option('-brnn', 0, [[use bidirectional RNN]])
+cmd:option('-brnn', 1, [[use bidirectional RNN]])
 
 -- optimization
+cmd:text('') cmd:text('**Optimization options') cmd:text('')
 cmd:option('-epochs', 13, [[epochs]])
 cmd:option('-start_epoch', 1, [[loading from a checkpoint, start where]])
 cmd:option('-param_init', 0.1, [[uniform distribution]])
@@ -35,6 +37,7 @@ cmd:option('-dropout', 0.3, [[dropout rate]])
 cmd:option('-lr_decay', 0.5, [[decay lr]])
 cmd:option('-start_decay_at', 9, [[start]])
 cmd:option('-curriculum', 0, [[order minibatches]])
+cmd:option('-max_batch_l', '', [[if blank infer valid max batch size]])
 
 -- we do n't load word vec or fix word vec
 
@@ -47,6 +50,7 @@ cmd:option('-cudnn', 1, [[use cudnn]])
 cmd:option('-save_every', 1, [[save epoch]])
 cmd:option('-print_every', 100, [[minibatches print]])
 cmd:option('-seed', 19941229, [[random seed]])
+cmd:option('-debug', 0, [[if debug]])
 
 -- src_mapxy, trg_mapxy
 cmd:option('-src_mapxy', '', [[src_mapxy file]])
@@ -57,7 +61,9 @@ flag = {}
 if opt.gpuid > 0 then flag.oneGPU = true else flag.oneGPU = false end
 if opt.gpuid2 > 0 then flag.twoGPU = true else flag.twoGPU = false end
 if opt.gpuid2 == nil or opt.gpuid2 <= 0 then opt.gpuid2 = opt.gpuid end -- force to the same gpu
-function setGPU(id) cutorch.setDevice(id) end
+function setGPU(id) 
+    if id > 0 then cutorch.setDevice(id) end
+end
 torch.manualSeed(opt.seed)
 
 
@@ -112,7 +118,7 @@ function train(train_data, valid_data)
     
     -- ??? do n't know why we need to setReuse()
     function msr(m) m:setReuse() end
-    for i = 1, opt.max_sent_l_src do
+    for i = 1, opt.max_sent_l_src * 2 do
         if encoder_clones[i].apply then
             encoder_clones[i]:apply(msr)
         end
@@ -120,57 +126,67 @@ function train(train_data, valid_data)
             encoder_bwd_clones[i]:apply(msr)
         end
     end
-    for i = 1, opt.max_sent_l_targ do
+    for i = 1, opt.max_sent_l_targ * 2 do
         if decoder_clones[i].apply then
             decoder_clones[i]:apply(msr)
         end
     end
 
+    
+    print('h_init go begin')
+    print(opt.max_batch_l, opt.rnn_size)
     local h_init = torch.zeros(opt.max_batch_l, opt.rnn_size)
-    if flag.oneGPU then
-        setGPU(opt.gpuid)
-        h_init = h_init:cuda()
-        if flag.twoGPU then
-            encoder_grad_proto2     = encoder_grad_proto2:cuda()
-            encoder_bwd_grad_proto2 = encoder_bwd_grad_proto2:cuda()
-            context_proto           = context_proto:cuda()
+    setGPU(opt.gpuid)
+    h_init = h_init:cuda()
+    if flag.twoGPU then
+        encoder_grad_proto2     = encoder_grad_proto2:cuda()
+        encoder_bwd_grad_proto2 = encoder_bwd_grad_proto2:cuda()
+        context_proto           = context_proto:cuda()
 
-            setGPU(opt.gpuid2)
-            encoder_grad_proto      = encoder_grad_proto:cuda()
-            encoder_bwd_grad_proto  = encoder_bwd_grad_proto:cuda()
-            context_proto2          = context_proto2:cuda()
-        else
-            context_proto           = context_proto:cuda()
-            encoder_grad_proto      = encoder_grad_proto:cuda()
-            encoder_bwd_grad_proto  = encoder_bwd_grad_proto:cuda()
-        end
+        setGPU(opt.gpuid2)
+        encoder_grad_proto      = encoder_grad_proto:cuda()
+        encoder_bwd_grad_proto  = encoder_bwd_grad_proto:cuda()
+        context_proto2          = context_proto2:cuda()
+    else
+        context_proto           = context_proto:cuda()
+        encoder_grad_proto      = encoder_grad_proto:cuda()
+        encoder_bwd_grad_proto  = encoder_bwd_grad_proto:cuda()
     end
 
     -- these are initial states of encoder/decoder for fwd/bwd steps
+    setGPU(opt.gpuid)
+    print('set gpu1, these are initial states of encoder/decoder for fwd/bwd steps')
     init_fwd_enc = {}
     init_bwd_enc = {}
     init_fwd_dec = {}
     init_bwd_dec = {}
+    init_tmp1    = {}
+    init_tmp2    = {}
 
     for L = 1, opt.num_layers do
         table.insert(init_fwd_enc, h_init:clone())
         table.insert(init_fwd_enc, h_init:clone()) -- cell and hidden
         table.insert(init_bwd_enc, h_init:clone())
         table.insert(init_bwd_enc, h_init:clone())
+        table.insert(init_tmp1,    h_init:clone())
+        table.insert(init_tmp1,    h_init:clone())
     end
 
-    if flag.twoGPU then setGPU(opt.gpuid2) end
+    setGPU(opt.gpuid2)
     for L = 1, opt.num_layers do
         table.insert(init_fwd_dec, h_init:clone())
         table.insert(init_fwd_dec, h_init:clone())
         table.insert(init_bwd_dec, h_init:clone())
         table.insert(init_bwd_dec, h_init:clone())
+        table.insert(init_tmp2,    h_init:clone())
+        table.insert(init_tmp2,    h_init:clone())
     end
     table.insert(init_bwd_dec, h_init:clone())     -- for label backward !
     
     dec_offset = 3 -- because inputs for dec, cell hidden starts from dec_offset
 
     function reset_state(state, batch_l, t)
+        if opt.debug then print('reset state begin') print(state, batch_l, t) end
         if t == nil then
             local u = {}
             for i = 1, #state do
@@ -184,6 +200,7 @@ function train(train_data, valid_data)
             end
             return u
         end
+        if opt.debug then print('reset state end') print() end
     end
 
     -- clean layer before saving to make the model smaller
@@ -206,7 +223,7 @@ function train(train_data, valid_data)
     -- decay lr
     function decay_lr(epoch)
         print(opt.val_perf)
-        if epoch >= opt.start_decay then start_decay = 1 end
+        if epoch >= opt.start_decay_at then start_decay = 1 end
         if opt.val_perf[#opt.val_perf] ~= nil and opt.val_perf[#opt.val_perf - 1] ~= nil then
             local curr_ppl = opt.val_perf[#opt.val_perf]
             local prev_ppl = opt.val_perf[#opt.val_perf - 1]
@@ -215,13 +232,15 @@ function train(train_data, valid_data)
         if start_decay == 1 then opt.learning_rate = opt.learning_rate * opt.lr_decay end
     end
 
-    function map(x, m)
-        print('map begin')
+    function map(x, m, gpu)
+        if opt.debug then print('map begin') end
+        setGPU(gpu)
         local y = x:clone()
         local s = y:storage()
         for i = 1, s:size() do
             s[i] = m[s[i]]
         end
+        if opt.debug then print('map end') end
         return y
     end
 
@@ -233,25 +252,32 @@ function train(train_data, valid_data)
         local num_words_target  = 0
         local num_words_source  = 0
 
-        for i = 1, data:size() do
+        local toend
+        if opt.debug then toend = 1 else toend = data:size() end
+        for i = 1, toend do
             zero_table(grad_params, layers_GPU)
             local d
             if epoch <= opt.curriculum then d = data[i]
             else d = data[batch_order[i]] end
-            local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
             local batch_l, target_l, source_l = d[5], d[6], d[7]
+            local target, target_out, nonzeros_filter, source = d[1], d[2], d[3], d[4]
+            local tmp = nonzeros_filter:clone():double()
+            if opt.debug then print(tmp) end
+            target = target_out local nonzeros = torch.sum(tmp) -- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! very important !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
             local encoder_grads = encoder_grad_proto[{{1, batch_l}, {1, source_l * 2}}]
             local encoder_bwd_grads
             if opt.brnn == 1 then encoder_bwd_grads = encoder_bwd_grad_proto[{{1, batch_l}, {1, source_l * 2}}] end
             if flag.oneGPU then setGPU(opt.gpuid) end
 
-            local source_x = map(source, src_mapx)
-            local source_y = map(source, src_mapy)
-            local target_x = map(target, trg_mapx)
-            local target_y = map(target, trg_mapy)
+            source_x = map(source, src_mapx, opt.gpuid)
+            source_y = map(source, src_mapy, opt.gpuid)
+            target_x = map(target, trg_mapx, opt.gpuid2)
+            target_y = map(target, trg_mapy, opt.gpuid2)
+            setGPU(opt.gpuid)
 
             local rnn_state_enc = reset_state(init_fwd_enc, batch_l, 0)
+        
             local context = context_proto[{{1, batch_l}, {1, source_l * 2}}]
     -- {encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}
             for t = 1, source_l do
@@ -307,21 +333,29 @@ function train(train_data, valid_data)
             end
 
             -- copy encoder last hidden state as decoder initial state
-            local rnn_state_dec = reset_state(init_fwd_enc, batch_l, 0)
+            if opt.debug then print('copy encoder last hidden state as decoder initial state') end
+            local rnn_state_dec = reset_state(init_fwd_dec, batch_l, 0)
             for L = 1, opt.num_layers do
                 rnn_state_dec[0][L * 2 - 1]:copy(rnn_state_enc[source_l * 2][L * 2 - 1])
                 rnn_state_dec[0][L * 2    ]:copy(rnn_state_enc[source_l * 2][L * 2    ])
             end
             if opt.brnn == 1 then
+                local tmp_state = reset_state(init_tmp2, batch_l)
                 for L = 1, opt.num_layers do
-                    rnn_state_dec[0][L * 2 - 1]:add(rnn_state_enc_bwd[1][L * 2 - 1])
-                    rnn_state_dec[0][L * 2    ]:add(rnn_state_enc_bwd[1][L * 2    ])
+                    tmp_state[L * 2 - 1]:copy(rnn_state_enc_bwd[1][L * 2 - 1])
+                    tmp_state[L * 2    ]:copy(rnn_state_enc_bwd[1][L * 2    ])
+                end
+                for L = 1, opt.num_layers do
+                    --rnn_state_dec[0][L * 2 - 1]:add(rnn_state_enc_bwd[1][L * 2 - 1])
+                    --rnn_state_dec[0][L * 2    ]:add(rnn_state_enc_bwd[1][L * 2    ])
+                    rnn_state_dec[0][L * 2 - 1]:add(tmp_state[L * 2 - 1])
+                    rnn_state_dec[0][L * 2    ]:add(tmp_state[L * 2    ])
                 end
             end
 
-
             -- define first input all 0 embedding
-            local decoder_input_zero = torch.zeros(batch_l, opt.word_vec_size)
+            if opt.debug then print('define first input all 0 embedding') end
+            local decoder_input_zero = torch.zeros(batch_l, opt.word_vec_size):cuda()
             -- forward prop decoder
             local preds = {}
             for t = 1, target_l do
@@ -352,6 +386,7 @@ function train(train_data, valid_data)
             end
 
             -- backward prop decoder
+            if opt.debug then print('backward prop decoder') end
             encoder_grads:zero()
             if opt.brnn == 1 then encoder_bwd_grads:zero() end
 
@@ -365,7 +400,9 @@ function train(train_data, valid_data)
                 local predy = generatory:forward(preds[2 * t]) -- backward y
                 loss = loss + criterion:forward(predy, target_y[t])/batch_l -- no need for target_out
                 local dl_dpred = criterion:backward(predy, target_y[t])
+                if opt.debug then print(dl_dpred:size(), 'vs', nonzeros_filter[t]:size()) end
                 dl_dpred:div(batch_l)
+                dl_dpred:cmul(nonzeros_filter[t]:view(dl_dpred:size(1), 1):expand(dl_dpred:size(1), dl_dpred:size(2)))
                 local dl_dtarget = generatory:backward(preds[2 * t], dl_dpred)
                 drnn_state_dec[#drnn_state_dec]:add(dl_dtarget)
 
@@ -387,6 +424,7 @@ function train(train_data, valid_data)
                 loss = loss + criterion:forward(predx, target_x[t])/batch_l
                 local dl_dpred = criterion:backward(predx, target_x[t])
                 dl_dpred:div(batch_l)
+                dl_dpred:cmul(nonzeros_filter[t]:view(dl_dpred:size(1), 1):expand(dl_dpred:size(1), dl_dpred:size(2)))
                 local dl_dtarget = generatorx:backward(preds[2 * t - 1], dl_dpred)
                 drnn_state_dec[#drnn_state_dec]:add(dl_dtarget)
 
@@ -408,12 +446,17 @@ function train(train_data, valid_data)
             end
             
             -- backward prop encoder
+            if opt.debug then print('backward prop encoder') end
             if flag.twoGPU then
                 setGPU(opt.gpuid)
                 local encoder_grads2 = encoder_grad_proto2[{{1, batch_l}, {1, source_l * 2}}]
                 encoder_grads2:zero()
                 encoder_grads2:copy(encoder_grads)
                 encoder_grads = encoder_grads2 -- batch_l x source_l*2 x rnn_size
+                local encoder_bwd_grads2 = encoder_bwd_grad_proto2[{{1, batch_l}, {1, source_l * 2}}]
+                encoder_bwd_grads2:zero()
+                encoder_bwd_grads2:copy(encoder_bwd_grads)
+                encoder_bwd_grads = encoder_bwd_grads2
             end
 
             local drnn_state_enc = reset_state(init_bwd_enc, batch_l)
@@ -509,6 +552,7 @@ function train(train_data, valid_data)
                 num_words_target / time_taken)
                 print(stats)
             end
+            if opt.debug then eval(valid_data) end
             if i % 200 == 0 then collectgarbage() end
         end
         return train_loss, train_nonzeros
@@ -516,6 +560,7 @@ function train(train_data, valid_data)
 
 
     local total_loss, total_nonzeros, batch_loss, batch_nonzeros
+    print('train running !!!')
     for epoch = opt.start_epoch, opt.epochs do
         generatorx:training() generatory:training()
         total_loss, total_nonzeros = train_batch(train_data, epoch)
@@ -545,6 +590,7 @@ end
 
 
 function eval(data)
+    if opt.debug then print('eval begin') end
     encoder_clones[1]:evaluate()
     encoder_clones[1]:evaluate()
     generatorx:evaluate()
@@ -562,18 +608,21 @@ function eval(data)
     local total = 0
     for i = 1, data:size() do
         local d = data[i]
-        local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
         local batch_l, target_l, source_l = d[5], d[6], d[7]
-        if flag.oneGPU then setGPU(opt.gpuid) end
+        local target, target_out, nonzeros_filter, source = d[1], d[2], d[3], d[4]
+        target = target_out local nonzeros = torch.sum(nonzeros_filter:clone():double()) -- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! very important !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-        local source_x = map(source, src_mapx)
-        local source_y = map(source, src_mapy)
-        local target_x = map(target, trg_mapx)
-        local target_y = map(target, trg_mapy)
+        source_x = map(source, src_mapx, opt.gpuid)
+        source_y = map(source, src_mapy, opt.gpuid)
+        target_x = map(target, trg_mapx, opt.gpuid2)
+        target_y = map(target, trg_mapy, opt.gpuid2)
+        setGPU(opt.gpuid)
+        setGPU(opt.gpuid)
 
         local rnn_state_enc = reset_state(init_fwd_enc, batch_l)
         local context       = context_proto[{{1, batch_l}, {1, source_l * 2}}]
         -- forward prop encoder
+        if opt.debug then print('forward prop encoder') end
         for t = 1, source_l do
             local source_embedx = enc_embedx:forward(source_x[t])
             local encoder_input_x = {source_embedx, table.unpack(rnn_state_enc)}
@@ -587,50 +636,62 @@ function eval(data)
             rnn_state_enc = out
             context[{{}, 2 * t}]:copy(out[#out])
         end
+        local rnn_state_enc_bwd 
+        if opt.brnn == 1 then
+            rnn_state_enc_bwd = reset_state(init_fwd_enc, batch_l)
+            for t = source_l, 1, -1 do
+                local source_embedy = enc_embedy:forward(source_y[t])
+                local encoder_input_y = {source_embedy, table.unpack(rnn_state_enc_bwd)}
+                local out = encoder_bwd_clones[1]:forward(encoder_input_y)
+                rnn_state_enc_bwd = out
+                context[{{}, 2 * t}]:add(out[#out])
 
+                -- second forward embedding x
+                local source_embedx = enc_embedx:forward(source_x[t])
+                local encoder_input_x = {source_embedx, table.unpack(rnn_state_enc_bwd)}
+                local out = encoder_bwd_clones[1]:forward(encoder_input_x)
+                rnn_state_enc_bwd = out
+                context[{{}, 2 * t - 1}]:add(out[#out])
+            end
+        end
+
+        -- go to gpu2
+        if opt.debug then print('go to gpu2') end
         if flag.twoGPU then
             setGPU(opt.gpuid2)
             local context2 = context_proto2[{{1, batch_l}, {1, source_l * 2}}]
             context2:copy(context)
             context = context2
         end
-
         local rnn_state_dec = reset_state(init_fwd_dec, batch_l)
         for L = 1, opt.num_layers do
             rnn_state_dec[L * 2 - 1]:copy(rnn_state_enc[L * 2 - 1])
             rnn_state_dec[L * 2    ]:copy(rnn_state_enc[L * 2    ])
         end
-
         if opt.brnn == 1 then
-            local rnn_state_enc = reset_state(init_fwd_enc, batch_l)
-            for t = source_l, 1, -1 do
-                local source_embedy = enc_embedy:forward(source_y[t])
-                local encoder_input_y = {source_embedy, table.unpack(rnn_state_enc)}
-                local out = encoder_bwd_clones[1]:forward(encoder_input_y)
-                rnn_state_enc = out
-                context[{{}, 2 * t}]:add(out[#out])
-
-                -- second forward embedding x
-                local source_embedx = enc_embedx:forward(source_x[t])
-                local encoder_input_x = {source_embedx, table.unpack(rnn_state_enc)}
-                local out = encoder_bwd_clones[1]:forward(encoder_input_x)
-                rnn_state_enc = out
-                context[{{}, 2 * t - 1}]:add(out[#out])
+            local tmp_state = reset_state(init_tmp2, batch_l)
+            for L = 1, opt.num_layers do
+                tmp_state[L * 2 - 1]:copy(rnn_state_enc_bwd[L * 2 - 1])
+                tmp_state[L * 2    ]:copy(rnn_state_enc_bwd[L * 2    ])
             end
             for L = 1, opt.num_layers do
-                rnn_state_dec[L * 2 - 1]:add(rnn_state_enc[L * 2 - 1])
-                rnn_state_dec[L * 2    ]:add(rnn_state_enc[L * 2    ])
+                --rnn_state_dec[L * 2 - 1]:add(rnn_state_enc_bwd[L * 2 - 1])
+                --rnn_state_dec[L * 2    ]:add(rnn_state_enc_bwd[L * 2    ])
+                rnn_state_dec[L * 2 - 1]:add(tmp_state[L * 2 - 1])
+                rnn_state_dec[L * 2    ]:add(tmp_state[L * 2    ])
             end
         end
 
+        if opt.debug then print('forward decoder to calculate loss') end
         local loss = 0
+        local decoder_input_zero = torch.zeros(batch_l, opt.word_vec_size):cuda()
         for t = 1, target_l do
             local decoder_input_y, first, ctx
             if t == 1 then          first = decoder_input_zero
             else                    first = dec_embedy:forward(target_y[t - 1]) end
             if opt.attn == 1 then   ctx   = context
             else                    ctx   = context[{{}, source_l * 2}] end
-            decoder_input_y = {first, ctx, table.unpack(rnn_state_dec])}
+            decoder_input_y = {first, ctx, table.unpack(rnn_state_dec)}
             local out = decoder_clones[1]:forward(decoder_input_y)
             rnn_state_dec = {}
             for j = 1, #out - 1 do table.insert(rnn_state_dec, out[j]) end
@@ -658,8 +719,9 @@ end
 
 function main()
     opt = cmd:parse(arg)
+    if opt.debug == 1 then opt.debug = true else opt.debug = false end
     if opt.gpuid > 0 then
-        print('using CUDA on GPU' .. opt.gpuid .. '...')
+        print('using CUDA on GPU ' .. opt.gpuid .. '...')
         if opt.gpuid2 > 0 then
             print('using CUDA on second GPU ' .. opt.gpuid2 .. '...')
         end
@@ -769,6 +831,8 @@ function main()
         trg_mapx, trg_mapy = mapxyfromfile(opt.trg_mapxy, trg_base)
     end
 
+    print(opt)
+
     opt.src_mapx = src_mapx
     opt.src_mapy = src_mapy
     opt.trg_mapx = trg_mapx
@@ -779,56 +843,4 @@ function main()
     train(train_data, valid_data)
 end
 
-local function randommapxy(vocab, base)
-    mapx = {} mapy = {}
-    local ind = {}
-    for i = 1, base do
-        for j = 1, base do
-            table.insert(ind, {i, j})
-        end
-    end
-    local r = torch.randperm(base * base)
-    for w = 1, vocab do
-        local p = ind[r[w]]
-        mapx[w] = p[1]
-        mapy[w] = p[2]
-    end
-    return mapx, mapy
-end
-
-local function check_conflict(mapx0, mapy0, vocab, base)
-    print('check if conflict with mapx, mapy')
-    allset = {}
-    distinct = {}
-    for i = 1, vocab do
-        if mapx0[i] <= 0 or mapx0[i] > base then print('error! range out 0 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-        elseif mapy0[i] <= 0 or mapy0[i] > base then print ('error ! range out 1 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!') end
-
-        newval = base * (mapx0[i] - 1) + mapy0[i] - 1
-        if allset[newval] == nil then table.insert(distinct, newval) end
-        allset[newval] = 1
-    end
-    if #distinct ~= vocab then
-        print('error!!!!!!!!!!!!!!!!!!!! #alldistinct = ', #distinct, 'not match with vocab = ', vocab)
-    end
-end
-
-local function mapxyfromfile(file, base)
-    local filemapxy = io.open(file, 'r')
-    local idx = 1 local idy
-    mapx = {} mapy = {}
-    while true do
-        local str = filemapxy:read()
-        if str == nil then break end
-        str = stringx.split(str)
-        for idy = 1, base do
-            local word = tonumber(str[idy])
-            if word > 0 then
-                mapx[word] = idx
-                mapy[word] = idy
-            end
-        end
-        idx = idx + 1
-    end
-    return mapx, mapy
-end
+main()

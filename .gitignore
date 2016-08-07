@@ -1,0 +1,4 @@
+models/*.t7
+data/*.hdf5
+data/*.dict
+log*.txt

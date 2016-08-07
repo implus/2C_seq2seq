@@ -121,6 +121,7 @@ def get_data(args):
         newseqlength = seqlength + 2 #add 2 for EOS and BOS
         targets = np.zeros((num_sents, newseqlength), dtype=int)
         target_output = np.zeros((num_sents, newseqlength), dtype=int)
+        nonzeros_filter = np.zeros((num_sents, newseqlength), dtype=int)
         sources = np.zeros((num_sents, newseqlength), dtype=int)
         source_lengths = np.zeros((num_sents,), dtype=int)
         target_lengths = np.zeros((num_sents,), dtype=int)
@@ -243,7 +244,10 @@ def get_data(args):
         for i in range(len(batch_idx)-1):
             batch_l.append(batch_idx[i+1] - batch_idx[i])            
             batch_w.append(source_l[batch_idx[i]-1])
-            nonzeros.append((target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1).sum().sum())
+            nonzeros.append((target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1).sum().sum()) 
+            #change by implus @!!!!!!!!!
+            nonzeros_filter[batch_idx[i] - 1: batch_idx[i + 1] - 1] = np.array(target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1, dtype=int)
+            #nonzeros.append(np.array(target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1, np.int32))
             target_l_max.append(max(target_l[batch_idx[i]-1:batch_idx[i+1]-1]))
 
         # Write output
@@ -257,7 +261,7 @@ def get_data(args):
         f["batch_l"] = np.array(batch_l, dtype=int)
         f["batch_w"] = np.array(batch_w, dtype=int)
         f["batch_idx"] = np.array(batch_idx[:-1], dtype=int)
-        f["target_nonzeros"] = np.array(nonzeros, dtype=int)
+        f["target_nonzeros"] = nonzeros_filter #np.array(nonzeros, dtype=int) #change by implus @!!!!!!!!!
         f["source_size"] = np.array([len(src_indexer.d)])
         f["target_size"] = np.array([len(target_indexer.d)])
         if chars == 1:            

@@ -10,6 +10,7 @@ function data:__init(opt, data_file)
     self.source  = f:read('source'):all()
     self.target  = f:read('target'):all()   
     self.target_output = f:read('target_output'):all()
+    self.target_nonzeros = f:read('target_nonzeros'):all()
     self.target_l = f:read('target_l'):all() --max target length each batch
     self.target_l_all = f:read('target_l_all'):all()
     self.target_l_all:add(-1)
@@ -23,7 +24,6 @@ function data:__init(opt, data_file)
 
     self.target_size = f:read('target_size'):all()[1]
     self.source_size = f:read('source_size'):all()[1]
-    self.target_nonzeros = f:read('target_nonzeros'):all()
 
     if opt.use_chars_enc == 1 then
         self.source_char = f:read('source_char'):all()
@@ -50,8 +50,9 @@ function data:__init(opt, data_file)
     end   
     for i = 1, self.length do
         local source_i, target_i
-        local target_output_i = self.target_output:sub(self.batch_idx[i],self.batch_idx[i]
-        +self.batch_l[i]-1, 1, self.target_l[i])
+        local target_output_i =          self.target_output:sub(self.batch_idx[i], self.batch_idx[i] + self.batch_l[i] - 1, 1, self.target_l[i])
+        local target_nonzeros_filter = self.target_nonzeros:sub(self.batch_idx[i], self.batch_idx[i] + self.batch_l[i] - 1, 1, self.target_l[i])
+
         local target_l_i = self.target_l_all:sub(self.batch_idx[i],
         self.batch_idx[i]+self.batch_l[i]-1)
         if opt.use_chars_enc == 1 then
@@ -77,14 +78,43 @@ function data:__init(opt, data_file)
         end
         table.insert(self.batches,  {target_i,
         target_output_i:transpose(1,2),
-        self.target_nonzeros[i], 
+        --self.target_nonzeros[i], -- non zeros matric for criterion backprop
+        target_nonzeros_filter:transpose(1, 2),
         source_i,
         self.batch_l[i],
         self.target_l[i],
         self.source_l[i],
         target_l_i})
+
     end
 end
+
+--[[
+function data:map(src_mapx, src_mapy, trg_mapx, trg_mapy)
+    print('hash original data into mapx, mapy part')
+    self.batchesmap = {}
+    for i = 1, self.length do
+        local source_i = self.batches[i][4] -- source_input
+        local target_i = self.batches[i][2] -- target_output
+
+        function map(x, m)
+            local y = x:clone()
+            local s = y:storage()
+            for i = 1, s:size() do
+                s[i] = m[ s[i] ]
+            end
+            return y
+        end
+
+        table.insert(self.batchesmap, {
+            map(source_i, src_mapx),
+            map(source_i, src_mapy),
+            map(target_i, trg_mapx),
+            map(target_i, trg_mapy)
+        })
+    end
+end
+]]
 
 function data:size()
     return self.length
@@ -102,18 +132,22 @@ function data.__index(self, idx)
         local target_l = self.batches[idx][6]
         local source_l = self.batches[idx][7]
         local target_l_all = self.batches[idx][8]
+        --local source_x = self.batchesmap[idx][1] local source_y = self.batchesmap[idx][2] local target_x = self.batchesmap[idx][3] local target_y = self.batchesmap[idx][4]
         if opt.gpuid >= 0 then --if multi-gpu, source lives in gpuid1, rest on gpuid2
             cutorch.setDevice(opt.gpuid)
             source_input = source_input:cuda()
+            --source_x     = source_x:cuda() source_y     = source_y:cuda()
             if opt.gpuid2 >= 0 then
                 cutorch.setDevice(opt.gpuid2)
             end	 
             target_input = target_input:cuda()
             target_output = target_output:cuda()
             target_l_all = target_l_all:cuda()
+            nonzeros     = nonzeros:cuda()
+            --target_x      = target_x:cuda() target_y      = target_y:cuda()
         end
         return {target_input, target_output, nonzeros, source_input,
-        batch_l, target_l, source_l, target_l_all}
+        batch_l, target_l, source_l, target_l_all} --, source_x, source_y, target_x, target_y}
     end
 end
 
