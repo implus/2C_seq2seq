@@ -247,7 +247,6 @@ def get_data(args):
             nonzeros.append((target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1).sum().sum()) 
             #change by implus @!!!!!!!!!
             nonzeros_filter[batch_idx[i] - 1: batch_idx[i + 1] - 1] = np.array(target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1, dtype=int)
-            #nonzeros.append(np.array(target_output[batch_idx[i]-1:batch_idx[i+1]-1] != 1, np.int32))
             target_l_max.append(max(target_l[batch_idx[i]-1:batch_idx[i+1]-1]))
 
         # Write output

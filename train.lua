@@ -48,6 +48,7 @@ cmd:option('-cudnn', 1, [[use cudnn]])
 
 -- bookkeeping
 cmd:option('-save_every', 1, [[save epoch]])
+cmd:option('-save_every_step', 10000, [[save epoch step]])
 cmd:option('-print_every', 100, [[minibatches print]])
 cmd:option('-seed', 19941229, [[random seed]])
 cmd:option('-debug', 0, [[if debug]])
@@ -402,7 +403,7 @@ function train(train_data, valid_data)
                 local dl_dpred = criterion:backward(predy, target_y[t])
                 if opt.debug then print(dl_dpred:size(), 'vs', nonzeros_filter[t]:size()) end
                 dl_dpred:div(batch_l)
-                dl_dpred:cmul(nonzeros_filter[t]:view(dl_dpred:size(1), 1):expand(dl_dpred:size(1), dl_dpred:size(2)))
+                --dl_dpred:cmul(nonzeros_filter[t]:view(dl_dpred:size(1), 1):expand(dl_dpred:size(1), dl_dpred:size(2)))
                 local dl_dtarget = generatory:backward(preds[2 * t], dl_dpred)
                 drnn_state_dec[#drnn_state_dec]:add(dl_dtarget)
 
@@ -424,7 +425,7 @@ function train(train_data, valid_data)
                 loss = loss + criterion:forward(predx, target_x[t])/batch_l
                 local dl_dpred = criterion:backward(predx, target_x[t])
                 dl_dpred:div(batch_l)
-                dl_dpred:cmul(nonzeros_filter[t]:view(dl_dpred:size(1), 1):expand(dl_dpred:size(1), dl_dpred:size(2)))
+                --dl_dpred:cmul(nonzeros_filter[t]:view(dl_dpred:size(1), 1):expand(dl_dpred:size(1), dl_dpred:size(2)))
                 local dl_dtarget = generatorx:backward(preds[2 * t - 1], dl_dpred)
                 drnn_state_dec[#drnn_state_dec]:add(dl_dtarget)
 
@@ -554,6 +555,18 @@ function train(train_data, valid_data)
             end
             if opt.debug then eval(valid_data) end
             if i % 200 == 0 then collectgarbage() end
+            if i % opt.save_every_step == 0 then
+                local savefile = string.format('%s_epoch%.2f_step%d_PPL%.2f.t7', opt.savefile, epoch, i, math.exp(train_loss/train_nonzeros))
+                print('saving step checkpoint to ' .. savefile)
+                clean_layer(generatorx)
+                clean_layer(generatory)
+            -- {encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}
+                if opt.brnn == 0 then
+                    torch.save(savefile, {{encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy}, opt})
+                else
+                    torch.save(savefile, {{encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}, opt})
+                end
+            end
         end
         return train_loss, train_nonzeros
     end
@@ -616,7 +629,6 @@ function eval(data)
         source_y = map(source, src_mapy, opt.gpuid)
         target_x = map(target, trg_mapx, opt.gpuid2)
         target_y = map(target, trg_mapy, opt.gpuid2)
-        setGPU(opt.gpuid)
         setGPU(opt.gpuid)
 
         local rnn_state_enc = reset_state(init_fwd_enc, batch_l)
@@ -817,6 +829,7 @@ function main()
         src_mapx = opt.src_mapx
         src_mapy = opt.src_mapy
     elseif opt.src_mapxy:len() == 0 then
+        print('randommapxy source')
         src_mapx, src_mapy = randommapxy(src_vocab, src_base)
     else
         src_mapx, src_mapy = mapxyfromfile(opt.src_mapxy, src_base)
@@ -826,13 +839,13 @@ function main()
         trg_mapx = opt.trg_mapx
         trg_mapy = opt.trg_mapy
     elseif opt.trg_mapxy:len() == 0 then
+        print('randommapxy target')
         trg_mapx, trg_mapy = randommapxy(trg_vocab, trg_base)
     else
         trg_mapx, trg_mapy = mapxyfromfile(opt.trg_mapxy, trg_base)
     end
 
     print(opt)
-
     opt.src_mapx = src_mapx
     opt.src_mapy = src_mapy
     opt.trg_mapx = trg_mapx
