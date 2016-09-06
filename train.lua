@@ -246,6 +246,7 @@ function train(train_data, valid_data)
     end
 
     function train_batch(data, epoch)
+        collectgarbage()
         local train_nonzeros    = 0
         local train_loss        = 0
         local batch_order       = torch.randperm(data.length)
@@ -784,6 +785,10 @@ function main()
         opt.rnn_size   = model_opt.rnn_size
         opt.attn       = model_opt.attn
         opt.brnn       = model_opt.brnn
+        opt.word_vec_size = model_opt.word_vec_size
+        opt.src_mapx   = nil
+        opt.trg_mapx   = nil
+
         encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy = 
         model[1]:double(), model[2]:double(), model[3]:double(), model[4]:double(), model[5]:double(), model[6]:double(),
         model[7]:double(), model[8]:double()
@@ -823,6 +828,7 @@ function main()
     local src_base  = math.ceil(math.sqrt(src_vocab))
     local trg_base  = math.ceil(math.sqrt(trg_vocab))
     print('src_base = ', src_base, 'trg_base = ', trg_base)
+    print(opt)
     -- get src_mapx, src_mapy, trg_mapx, trg_mapy
     src_mapx = {} src_mapy = {} trg_mapx = {} trg_mapy = {}
     if opt.src_mapx ~= nil then
@@ -845,7 +851,6 @@ function main()
         trg_mapx, trg_mapy = mapxyfromfile(opt.trg_mapxy, trg_base)
     end
 
-    print(opt)
     opt.src_mapx = src_mapx
     opt.src_mapy = src_mapy
     opt.trg_mapx = trg_mapx
@@ -853,6 +858,7 @@ function main()
 
     check_conflict(src_mapx, src_mapy, src_vocab, src_base)
     check_conflict(trg_mapx, trg_mapy, trg_vocab, trg_base)
+    collectgarbage()
     train(train_data, valid_data)
 end
 

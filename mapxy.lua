@@ -33,6 +33,7 @@ function check_conflict(mapx0, mapy0, vocab, base)
 end
 
 function mapxyfromfile(file, base)
+    print('load map from '..file)
     local filemapxy = io.open(file, 'r')
     local idx = 1 local idy
     mapx = {} mapy = {}
