@@ -61,7 +61,7 @@ opt = cmd:parse(arg)
 flag = {}
 if opt.gpuid > 0 then flag.oneGPU = true else flag.oneGPU = false end
 if opt.gpuid2 > 0 then flag.twoGPU = true else flag.twoGPU = false end
-if opt.gpuid2 == nil or opt.gpuid2 <= 0 then opt.gpuid2 = opt.gpuid end -- force to the same gpu
+if opt.gpuid2 == nil or opt.gpuid2 <= 0 then opt.gpuid2 = opt.gpuid print('force the same') end -- force to the same gpu
 function setGPU(id) 
     if id > 0 then cutorch.setDevice(id) end
 end
