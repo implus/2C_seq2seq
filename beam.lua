@@ -77,6 +77,7 @@ function wordidx2sent(sent, hash2word, skip_end)
 end
 
 function idx2key(file)
+    print('debug = ', file)
     local f = io.open(file, 'r')
     local t = {}
     for line in f:lines() do
@@ -88,6 +89,7 @@ function idx2key(file)
     end
     return t
 end
+
 function flip_table(u)
     local t = {}
     for key, value in pairs(u) do t[value] = key end

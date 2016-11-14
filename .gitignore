@@ -3,3 +3,6 @@ data/*.hdf5
 data/*.dict
 log*.txt
 en2ch_models/*
+en2ch_filemodels/*
+en2fr_filemodels/*
+filemodels/*

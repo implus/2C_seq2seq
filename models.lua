@@ -122,7 +122,7 @@ function make_decoder_attn(data, opt, simple)
     local softmax_attn = nn.SoftMax()
     softmax_attn.name = 'softmax_attn'
     attn = softmax_attn(attn)
-    attn = nn.Replicate(1,2)(attn) -- batch_l x  1 x source_l
+    attn = nn.Replicate(1,2)(attn) -- batch_l x 1 x source_l
 
     -- apply attention to context
     local context_combined = nn.MM()({attn, context}) -- batch_l x 1 x rnn_size
@@ -130,8 +130,7 @@ function make_decoder_attn(data, opt, simple)
     local context_output
     if simple == 0 then
         context_combined = nn.JoinTable(2)({context_combined, inputs[1]}) -- batch_l x rnn_size*2
-        context_output = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2,
-        opt.rnn_size)(context_combined))
+        context_output = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2, opt.rnn_size)(context_combined))
     else
         context_output = nn.CAddTable()({context_combined,inputs[1]})
     end   

@@ -56,6 +56,9 @@ cmd:option('-debug', 0, [[if debug]])
 -- src_mapxy, trg_mapxy
 cmd:option('-src_mapxy', '', [[src_mapxy file]])
 cmd:option('-trg_mapxy', '', [[trg_mapxy file]])
+--cmd:option('-auto_update', '1', [[auto update mapxy]])
+cmd:option('-filemodels', 'filemodels', [[auto update mapxy stored in here]])
+cmd:option('-trg_idx2word_path', '../2C_RNN/exp_en2ch_ch/data/', [[auto update word vocabulary]])
 
 opt = cmd:parse(arg)
 flag = {}
@@ -245,7 +248,7 @@ function train(train_data, valid_data)
         return y
     end
 
-    function train_batch(data, epoch)
+    function train_batch(data, epoch, round)
         collectgarbage()
         local train_nonzeros    = 0
         local train_loss        = 0
@@ -544,8 +547,8 @@ function train(train_data, valid_data)
             train_loss       = train_loss + batch_l * loss
             local time_taken = timer:time().real - start_time
             if i % opt.print_every == 0 then
-                local stats = string.format('Epoch: %d, Batch: %d/%d, Batch size: %d, LR: %.4f, ', 
-                epoch, i, data:size(), batch_l, opt.learning_rate)
+                local stats = string.format('Round: %d, Epoch: %d, Batch: %d/%d, Batch size: %d, LR: %.4f, ', 
+                round, epoch, i, data:size(), batch_l, opt.learning_rate)
                 stats = stats .. string.format('PPL: %.2f, |Param|: %.2f, |GParam|: %.2f, ',
                 math.exp(train_loss/train_nonzeros), param_norm, grad_norm)
                 stats = stats .. string.format('Training: %d/%d/%d total/source/target tokens/sec',
@@ -557,7 +560,7 @@ function train(train_data, valid_data)
             if opt.debug then eval(valid_data) end
             if i % 200 == 0 then collectgarbage() end
             if i % opt.save_every_step == 0 then
-                local savefile = string.format('%s_epoch%.2f_step%d_PPL%.2f.t7', opt.savefile, epoch, i, math.exp(train_loss/train_nonzeros))
+                local savefile = string.format('%s_round%d_epoch%.2f_step%d_PPL%.2f.t7', opt.savefile, round, epoch, i, math.exp(train_loss/train_nonzeros))
                 print('saving step checkpoint to ' .. savefile)
                 clean_layer(generatorx)
                 clean_layer(generatory)
@@ -573,8 +576,42 @@ function train(train_data, valid_data)
     end
 
 
+
     local total_loss, total_nonzeros, batch_loss, batch_nonzeros
     print('train running !!!')
+    for round = 0, 1000 do
+        print('------------------------ round '..round..' begin! ---------------------------------')
+        updatebest_c(train_data, round)
+
+        opt.train_perf = {}
+        opt.val_perf   = {}
+        print('this round have ', opt.epochs, ' epochs')
+        for epoch = 1, opt.epochs do
+            generatorx:training() generatory:training()
+            total_loss, total_nonzeros = train_batch(train_data, epoch, round)
+
+            local train_score = math.exp(total_loss/total_nonzeros)
+            print('Train', train_score)
+
+            opt.train_perf[#opt.train_perf + 1] = train_score
+            local score = eval(valid_data)
+            opt.val_perf[#opt.val_perf + 1] = score
+            if opt.optim == 'sgd' then decay_lr(epoch) end
+            local savefile = string.format('%s_round%d_epoch%.2f_%.2f.t7', opt.savefile, round, epoch, score)
+            if epoch % opt.save_every == 0 then
+                print('saving checkpoint to '..savefile)
+                clean_layer(generatorx)
+                clean_layer(generatory)
+                -- {encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}
+                if opt.brnn == 0 then
+                    torch.save(savefile, {{encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy}, opt})
+                else
+                    torch.save(savefile, {{encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}, opt})
+                end
+            end
+        end
+    end
+    --[[
     for epoch = opt.start_epoch, opt.epochs do
         generatorx:training() generatory:training()
         total_loss, total_nonzeros = train_batch(train_data, epoch)
@@ -592,14 +629,14 @@ function train(train_data, valid_data)
             print('saving checkpoint to ' .. savefile)
             clean_layer(generatorx)
             clean_layer(generatory)
-    -- {encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}
+            -- {encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}
             if opt.brnn == 0 then
                 torch.save(savefile, {{encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy}, opt})
             else
                 torch.save(savefile, {{encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}, opt})
             end
         end
-    end
+    end ]]
 end
 
 
@@ -729,6 +766,217 @@ function eval(data)
     return valid
 end
 
+function updatebest_c(data, round)
+    if opt.debug then print('updatebest_c begin, generate new mapx, mapy for opt') end
+    encoder_clones[1]:evaluate()
+    decoder_clones[1]:evaluate()
+    generatorx:evaluate()
+    generatory:evaluate()
+    enc_embedx:evaluate()
+    enc_embedy:evaluate()
+    dec_embedx:evaluate()
+    dec_embedy:evaluate()
+
+    if opt.brnn == 1 then encoder_bwd_clones[1]:evaluate() end
+
+    local nll = 0
+    local total = 0
+    local vocab_size = #trg_mapx
+    local vocab_code = math.ceil(math.sqrt(1.0 * #trg_mapx))
+    print('trg_mapx s size = ', #trg_mapx, 'sqrt size = ', math.ceil(math.sqrt(1.0 * #trg_mapx)))
+
+    local probx = torch.zeros(vocab_size, vocab_code)
+    local proby = torch.zeros(vocab_size, vocab_code)
+    -- from opt.trg_mapx + opt.trg_mapy -> (x, y)=id
+    local xy2id = {} local xy2id_base = 10000
+    for i = 1, vocab_size do
+        local xy = xy2id_base * trg_mapx[i] + trg_mapy[i]
+        xy2id[xy] = i
+    end
+
+    --for i = 1, data:size() do
+    for i = 1, 10 do
+        local d = data[i]
+        local batch_l, target_l, source_l = d[5], d[6], d[7]
+        local target, target_out, nonzeros_filter, source = d[1], d[2], d[3], d[4]
+        target = target_out local nonzeros = torch.sum(nonzeros_filter:clone():double()) -- !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! very important !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        source_x = map(source, src_mapx, opt.gpuid)
+        source_y = map(source, src_mapy, opt.gpuid)
+        target_x = map(target, trg_mapx, opt.gpuid2)
+        target_y = map(target, trg_mapy, opt.gpuid2)
+        setGPU(opt.gpuid)
+
+        local rnn_state_enc = reset_state(init_fwd_enc, batch_l)
+        local context       = context_proto[{{1, batch_l}, {1, source_l * 2}}]
+        -- forward prop encoder
+        if opt.debug then print('forward prop encoder') end
+        for t = 1, source_l do
+            local source_embedx = enc_embedx:forward(source_x[t])
+            local encoder_input_x = {source_embedx, table.unpack(rnn_state_enc)}
+            local out = encoder_clones[1]:forward(encoder_input_x)
+            rnn_state_enc = out
+            context[{{}, 2 * t - 1}]:copy(out[#out])
+
+            local source_embedy = enc_embedy:forward(source_y[t])
+            local encoder_input_y = {source_embedy, table.unpack(rnn_state_enc)}
+            local out = encoder_clones[1]:forward(encoder_input_y)
+            rnn_state_enc = out
+            context[{{}, 2 * t}]:copy(out[#out])
+        end
+        local rnn_state_enc_bwd 
+        if opt.brnn == 1 then
+            rnn_state_enc_bwd = reset_state(init_fwd_enc, batch_l)
+            for t = source_l, 1, -1 do
+                local source_embedy = enc_embedy:forward(source_y[t])
+                local encoder_input_y = {source_embedy, table.unpack(rnn_state_enc_bwd)}
+                local out = encoder_bwd_clones[1]:forward(encoder_input_y)
+                rnn_state_enc_bwd = out
+                context[{{}, 2 * t}]:add(out[#out])
+
+                -- second forward embedding x
+                local source_embedx = enc_embedx:forward(source_x[t])
+                local encoder_input_x = {source_embedx, table.unpack(rnn_state_enc_bwd)}
+                local out = encoder_bwd_clones[1]:forward(encoder_input_x)
+                rnn_state_enc_bwd = out
+                context[{{}, 2 * t - 1}]:add(out[#out])
+            end
+        end
+
+        -- go to gpu2
+        if opt.debug then print('go to gpu2') end
+        if flag.twoGPU then
+            setGPU(opt.gpuid2)
+            local context2 = context_proto2[{{1, batch_l}, {1, source_l * 2}}]
+            context2:copy(context)
+            context = context2
+        end
+        local rnn_state_dec = reset_state(init_fwd_dec, batch_l)
+        for L = 1, opt.num_layers do
+            rnn_state_dec[L * 2 - 1]:copy(rnn_state_enc[L * 2 - 1])
+            rnn_state_dec[L * 2    ]:copy(rnn_state_enc[L * 2    ])
+        end
+        if opt.brnn == 1 then
+            local tmp_state = reset_state(init_tmp2, batch_l)
+            for L = 1, opt.num_layers do
+                tmp_state[L * 2 - 1]:copy(rnn_state_enc_bwd[L * 2 - 1])
+                tmp_state[L * 2    ]:copy(rnn_state_enc_bwd[L * 2    ])
+            end
+            for L = 1, opt.num_layers do
+                --rnn_state_dec[L * 2 - 1]:add(rnn_state_enc_bwd[L * 2 - 1])
+                --rnn_state_dec[L * 2    ]:add(rnn_state_enc_bwd[L * 2    ])
+                rnn_state_dec[L * 2 - 1]:add(tmp_state[L * 2 - 1])
+                rnn_state_dec[L * 2    ]:add(tmp_state[L * 2    ])
+            end
+        end
+
+        if opt.debug then print('forward decoder to calculate loss') end
+        local loss = 0
+        local decoder_input_zero = torch.zeros(batch_l, opt.word_vec_size):cuda()
+        for t = 1, target_l do
+            local target_id = torch.zeros(batch_l)
+            print('target_l = ', target_l)
+            print('target_x size = ', target_x:size())
+            local target_x_cpu = torch.LongTensor(target_x:size(2)):copy(target_x[t])
+            local target_y_cpu = torch.LongTensor(target_y:size(2)):copy(target_y[t])
+            assert(batch_l == target_x_cpu:size(1))
+            for a = 1, batch_l do
+                local xy = xy2id_base * target_x_cpu[a] + target_y_cpu[a]
+                target_id[a] = xy2id[xy]
+            end
+
+            local decoder_input_y, first, ctx
+            if t == 1 then          first = decoder_input_zero
+            else                    first = dec_embedy:forward(target_y[t - 1]) end
+            if opt.attn == 1 then   ctx   = context
+            else                    ctx   = context[{{}, source_l * 2}] end
+            decoder_input_y = {first, ctx, table.unpack(rnn_state_dec)}
+            local out = decoder_clones[1]:forward(decoder_input_y)
+            rnn_state_dec = {}
+            for j = 1, #out - 1 do table.insert(rnn_state_dec, out[j]) end
+            local pred = generatorx:forward(out[#out])
+            loss = loss + criterion:forward(pred, target_x[t])
+
+            assert(pred:size(1) == batch_l)
+            assert(pred:size(2) == vocab_code)
+            local predx = torch.DoubleTensor(pred:size()):copy(pred)
+            for a = 1, batch_l do
+                local idx = target_id[a]
+                probx[idx] = probx[idx] - predx[a]
+            end
+
+            local decoder_input_x = {dec_embedx:forward(target_x[t]), ctx, table.unpack(rnn_state_dec)}
+            local out = decoder_clones[1]:forward(decoder_input_x)
+            rnn_state_dec = {}
+            for j = 1, #out - 1 do table.insert(rnn_state_dec, out[j]) end
+            local pred = generatory:forward(out[#out])
+            loss = loss + criterion:forward(pred, target_y[t])
+
+            local predy = torch.DoubleTensor(pred:size()):copy(pred)
+            for a = 1, batch_l do
+                local idx = target_id[a]
+                proby[idx] = proby[idx] - predy[a]
+            end
+        end
+        nll = nll + loss
+        total = total + nonzeros
+        -- {encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy, encoder_bwd}
+    end
+    local valid = math.exp(nll/total)
+    collectgarbage()
+    
+    print('all loss get for probx proby, savefiles...')
+    local filemodels = opt.filemodels
+    if not path.exists('./'..filemodels..'/') then lfs.mkdir('./'..filemodels..'/') end
+    local xfilename = './'..filemodels..'/round'..round..'.probx.t7'
+    local filex = io.open(xfilename, 'w')
+    for word = 1, vocab_size do
+        for i = 1, vocab_code do 
+            filex:write(' '..probx[word][i])
+        end
+        filex:write('\n')
+    end
+    filex:close()
+
+    local yfilename = './'..filemodels..'/round'..round..'.proby.t7'
+    local filey = io.open(yfilename, 'w')
+    for word = 1, vocab_size do
+        for i = 1, vocab_code do
+            filey:write(' '..proby[word][i])
+        end
+        filey:write('\n')
+    end
+    filey:close()
+
+    print('round '..round..' file probx, proby saved! call c++ program to deal')
+    local mapxyfilename = './'..filemodels..'/round'..round..'.trg_mapxy.t7'
+    local cmd = './implus '..xfilename..' '..yfilename..' '..mapxyfilename..' '.. opt.trg_idx2word_path ..'/idx2word.txt'
+    print(cmd)
+    local handle = io.popen(cmd)
+    handle:close()
+
+    print('assign trg_mapx, trg_mapy')
+    local filemapxy = io.open(mapxyfilename, 'r')
+    local idx = 1 local idy
+    trg_mapx = {}
+    trg_mapy = {}
+    while true do
+        local str = filemapxy:read()
+        if str == nil then break end
+        str = stringx.split(str)
+        for idy = 1, vocab_code do
+            local word = tonumber(str[idy])
+            if word > 0 then
+                trg_mapx[word] = idx
+                trg_mapy[word] = idy
+            end
+        end
+        idx = idx + 1
+    end
+    opt.trg_mapx = trg_mapx
+    opt.trg_mapy = trg_mapy
+    check_conflict(trg_mapx, trg_mapy, vocab_size, vocab_code)
+end
 
 function main()
     opt = cmd:parse(arg)
@@ -788,6 +1036,8 @@ function main()
         opt.word_vec_size = model_opt.word_vec_size
         opt.src_mapx   = nil
         opt.trg_mapx   = nil
+        opt.src_mapxy  = model_opt.src_mapxy
+        opt.trg_mapxy  = model_opt.trg_mapxy
 
         encoder, decoder, generatorx, generatory, enc_embedx, enc_embedy, dec_embedx, dec_embedy = 
         model[1]:double(), model[2]:double(), model[3]:double(), model[4]:double(), model[5]:double(), model[6]:double(),
@@ -829,6 +1079,8 @@ function main()
     local trg_base  = math.ceil(math.sqrt(trg_vocab))
     print('src_base = ', src_base, 'trg_base = ', trg_base)
     print(opt)
+end
+--[[
     -- get src_mapx, src_mapy, trg_mapx, trg_mapy
     src_mapx = {} src_mapy = {} trg_mapx = {} trg_mapy = {}
     if opt.src_mapx ~= nil then
@@ -861,5 +1113,5 @@ function main()
     collectgarbage()
     train(train_data, valid_data)
 end
-
+]]
 main()
